@@ -1,0 +1,20 @@
+name: gas_lift_env
+channels:
+  - snowflake
+  - conda-forge
+dependencies:
+  - python=3.10
+  - fastapi
+  - uvicorn
+  - sqlmodel
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - pulp
+  - python-dotenv
+  - python-multipart
+  - snowflake-connector-python
+  - snowflake-snowpark-python
+  - httpx
+  - pytest
