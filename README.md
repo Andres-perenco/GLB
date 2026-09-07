@@ -4,7 +4,7 @@ Production-grade gas lift injection allocation and optimization backend service 
 
 ---
 
-## 📑 Table of Contents
+### 📑 Table of Contents
 1. [General Architecture](#-general-architecture)
 2. [Backend Directory Structure](#-backend-directory-structure)
 3. [Environment Configuration & Variables](#-environment-configuration--variables)
@@ -13,10 +13,9 @@ Production-grade gas lift injection allocation and optimization backend service 
    - [Data Controller (`/api/data`)](#2-data-controller-apidata)
    - [Well Controller (`/api/wells`)](#3-well-controller-apiwells)
    - [Optimization Controller (`/api/optimization`)](#4-optimization-controller-apioptimization)
-5. [Local Development Setup](#-local-development-setup)
-6. [Deployment 1: Manual Deployment to Snowflake Container Services (SPCS)](#-deployment-1-manual-deployment-to-snowflake-container-services-spcs)
-7. [Deployment 2: Automated CI/CD with GitHub Actions](#-deployment-2-automated-cicd-with-github-actions)
-8. [Monitoring & Troubleshooting](#-monitoring--troubleshooting)
+5. [Local Development Setup & Execution](#-local-development-setup--execution)
+6. [Testing & Quality Assurance](#-testing--quality-assurance)
+7. [Troubleshooting & FAQ](#-troubleshooting--faq)
 
 ---
 
@@ -25,33 +24,29 @@ Production-grade gas lift injection allocation and optimization backend service 
 ```mermaid
 flowchart TD
     subgraph Client Application / Consumers
-        Client[External App / Client / Microservice]
+        Client[Frontend App / Streamlit / Postman / cURL]
     end
 
-    subgraph Snowflake SPCS Pod / Docker Host
+    subgraph Local Environment
         Backend[FastAPI Service :8000]
         SQLite[(SQLite DB: gas_lift_local.db)]
-        OAuthToken["SPCS Token /snowflake/session/token"]
+        EnvFile[Configuration: .env]
     end
 
     subgraph Snowflake Cloud
         SnowflakeDB[(Snowflake DW - PROD / RAW / SANDBOX)]
-        Stage[Stage: @PROD.PUBLIC.SPCS_SPECS]
-        ImageRegistry[Image Registry: prod/public/gas_lift_images]
     end
 
     Client -->|HTTP REST API :8000| Backend
     Backend --> SQLite
-    OAuthToken -.->|Auto SPCS Auth| Backend
+    EnvFile -.->|Credentials & Settings| Backend
     Backend -->|snowflake-connector-python| SnowflakeDB
 ```
 
-The backend operates as an autonomous, headless microservice:
+The backend operates as an autonomous REST API service:
 - **Mathematical Computation & Optimization Pipeline:** Performance curve fitting (Namdar non-linear regressor with confidence intervals) and mathematical programming constrained by total field gas lift availability or global optimal envelope exploration.
-- **Hybrid Persistence:**
-  - **SQLModel / Local SQLite (`gas_lift_local.db`):** Stores historical field optimization runs and detailed allocations per well.
-  - **Snowflake Database:** Reads corporate wellbore metadata and historical production test metrics (`BSW`, `Q_OIL`, `Q_GAS`, `WHP`).
-- **Dual Authentication Mode:** Automatically detects if it is running inside SPCS (using the OAuth token mounted at `/snowflake/session/token`) or in a local development environment (using credentials from `.env`). If Snowflake is unreachable, it seamlessly switches to a resilient fallback with realistic mock data.
+- **Relational Persistence (`gas_lift_local.db`):** Uses SQLModel / SQLite locally to store historical field optimization runs and detailed allocations per well.
+- **Snowflake Database Integration & Fallback:** Connects directly to Snowflake via credentials configured in `.env` to read corporate wellbore metadata and historical production test metrics (`BSW`, `Q_OIL`, `Q_GAS`, `WHP`). If Snowflake is offline or unreachable, it seamlessly switches to a resilient fallback with realistic mock data.
 
 ---
 
@@ -59,10 +54,9 @@ The backend operates as an autonomous, headless microservice:
 
 ```
 backend/
-├── Dockerfile                  # Linux/AMD64 Docker image for SPCS
-├── requirements.txt            # Python dependencies
+├── requirements.txt            # Python backend dependencies
 ├── main.py                     # FastAPI application instance, CORS, router inclusion
-├── database.py                 # Smart Snowflake connection + SQLModel engine
+├── database.py                 # Direct Snowflake connection + SQLModel engine
 ├── controllers/                # HTTP endpoint controllers
 │   ├── data_controller.py      # CSV file upload and parsing
 │   ├── well_controller.py      # Active wells and production tests retrieval
@@ -119,7 +113,7 @@ RAW_SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
 
 > [!NOTE]
-> In **Snowflake Container Services (SPCS)**, the file `/snowflake/session/token` is injected automatically. The backend identifies this path and switches to internal OAuth authentication, eliminating the need for hardcoded credentials.
+> If Snowflake credentials are not configured or the remote service is unavailable, the application gracefully activates fallback mock data so you can continue testing and developing locally without interruption.
 
 ---
 
@@ -314,292 +308,81 @@ Returns individual well allocations associated with optimization run `opt_id`.
 
 ---
 
-## 💻 Local Development Setup
+## 💻 Local Development Setup & Execution
 
 ### 1. Prerequisites
 - Python 3.10 or 3.11
-- pip or Conda
+- Conda (Miniconda / Anaconda) or `pip` / `venv`
 
-### 2. Environment & Dependencies Installation
+### 2. Environment Setup
+
+#### Option A: Using Conda (Recommended)
+If you already have the `gltb` environment:
+```bash
+conda activate gltb
+```
+
+Or create it from `environment.yml`:
+```bash
+conda env create -f environment.yml
+conda activate gltb
+```
+
+#### Option B: Using Python `venv`
 ```bash
 # Create and activate virtual environment
 python -m venv venv
-source venv/bin/activate   # On Windows: venv\Scripts\activate
 
-# Install backend dependencies
+# On Linux/macOS:
+source venv/bin/activate
+
+# On Windows (PowerShell):
+.\venv\Scripts\Activate.ps1
+
+# Install dependencies
 pip install -r backend/requirements.txt
 ```
 
 ### 3. Start the FastAPI Server
-Run from the root directory of the project:
-```bash
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-The server will listen at `http://localhost:8000`. Upon startup, it creates the local SQLite database file `gas_lift_local.db` in the repository root if it does not already exist.
-
----
-
-## 🚀 Deployment 1: Manual Deployment to Snowflake Container Services (SPCS)
-
-Snowflake Container Services executes OCI container images within Snowflake's managed security boundary.
-
-### Step 1: Provision Snowflake Infrastructure (SQL)
-
-Run the following DDL in your Snowflake worksheet with an administrative role (e.g., `ACCOUNTADMIN`):
-
-```sql
-USE ROLE ACCOUNTADMIN;
-CREATE DATABASE IF NOT EXISTS PROD;
-CREATE SCHEMA IF NOT EXISTS PROD.PUBLIC;
-USE SCHEMA PROD.PUBLIC;
-
--- 1. Create the Compute Pool
-CREATE COMPUTE_POOL IF NOT EXISTS GAS_LIFT_COMPUTE_POOL
-  MIN_NODES = 1
-  MAX_NODES = 1
-  INSTANCE_FAMILY = 'CPU_X64_XS'
-  AUTO_RESUME = TRUE
-  AUTO_SUSPEND_SECS = 3600;
-
--- 2. Create the Image Repository
-CREATE IMAGE REPOSITORY IF NOT EXISTS PROD.PUBLIC.GAS_LIFT_IMAGES;
-
--- Obtain the repository registry URL:
-SHOW IMAGE REPOSITORIES IN SCHEMA PROD.PUBLIC;
--- Example Registry URL: zneenng-hz50319.registry.snowflakecomputing.com/prod/public/gas_lift_images
-
--- 3. Create the Stage for specification YAML files
-CREATE STAGE IF NOT EXISTS PROD.PUBLIC.SPCS_SPECS
-  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-```
-
----
-
-### Step 2: Authenticate with Snowflake Container Registry
-
-Authenticate your local Docker CLI against Snowflake:
+Run from the root directory of the repository:
 
 ```bash
-docker login zneenng-hz50319.registry.snowflakecomputing.com -u <YOUR_SNOWFLAKE_USERNAME>
+uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-*(Enter your Snowflake password when prompted)*.
+
+Or using Python module syntax:
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+The server will listen at `http://localhost:8000`. Upon initial startup, it automatically creates the local SQLite database file `gas_lift_local.db` in the repository root if it does not exist.
 
 ---
 
-### Step 3: Multi-Platform Docker Build
+## 🧪 Testing & Quality Assurance
 
-> [!IMPORTANT]
-> SPCS nodes require the **`linux/amd64`** architecture. When building on Apple Silicon (M1/M2/M3) or Windows ARM machines, you **must** supply `--platform linux/amd64`.
-
-Execute from the root directory of the project:
+Run the automated test suite with `pytest`:
 
 ```bash
-# 1. Set registry environment variable
-REGISTRY="zneenng-hz50319.registry.snowflakecomputing.com/prod/public/gas_lift_images"
+# With active environment
+pytest backend/tests
 
-# 2. Build Backend image
-docker build --platform linux/amd64 \
-  -t $REGISTRY/gas_lift_backend:latest \
-  -f backend/Dockerfile .
+# Or directly with Conda:
+conda run -n gltb pytest backend/tests
 ```
+
+The test suite covers:
+- API endpoints and JSON serialization (`test_api.py`)
+- Performance curve fitting and confidence intervals (`test_fitting.py`)
+- Regression model calculations and bounds (`test_regression.py`)
 
 ---
 
-### Step 4: Push Docker Image to Snowflake
+## 🔍 Troubleshooting & FAQ
 
-```bash
-docker push $REGISTRY/gas_lift_backend:latest
-```
-
----
-
-### Step 5: Upload Specification File (`spcs_service.yaml`)
-
-Upload the specification file to the Snowflake stage using SnowSQL, Snowflake CLI, or Python:
-
-```bash
-snowsql -a zneenng-hz50319 -u <YOUR_SNOWFLAKE_USERNAME> -q "PUT file://spcs_service.yaml @PROD.PUBLIC.SPCS_SPECS AUTO_COMPRESS=FALSE OVERWRITE=TRUE;"
-```
-
----
-
-### Step 6: Create or Update the Service in Snowflake
-
-Run in Snowflake SQL:
-
-```sql
-USE ROLE ACCOUNTADMIN;
-USE SCHEMA PROD.PUBLIC;
-
--- First-time service creation:
-CREATE SERVICE PROD.PUBLIC.GAS_LIFT_SERVICE
-  IN COMPUTE_POOL GAS_LIFT_COMPUTE_POOL
-  FROM @PROD.PUBLIC.SPCS_SPECS
-  SPECIFICATION_FILE = 'spcs_service.yaml';
-
--- Updating an existing service with new images or specifications:
-ALTER SERVICE PROD.PUBLIC.GAS_LIFT_SERVICE 
-  FROM @PROD.PUBLIC.SPCS_SPECS 
-  SPECIFICATION_FILE = 'spcs_service.yaml';
-```
-
----
-
-### Step 7: Retrieve Public Endpoint URLs
-
-Query the service endpoints to obtain public HTTPS URLs:
-
-```sql
-SHOW ENDPOINTS IN SERVICE PROD.PUBLIC.GAS_LIFT_SERVICE;
-```
-
-Copy the URL of the `backend-api` endpoint (port 8000) for FastAPI.
-
----
-
-## 🔄 Deployment 2: Automated CI/CD with GitHub Actions
-
-Automate container build, multi-platform compilation, image push, and service update whenever code is pushed to the `main` branch.
-
-### Step 1: Configure Repository Secrets
-Navigate to your GitHub repository > **Settings** > **Secrets and variables** > **Actions** and register the following secrets:
-
-| Secret Name | Description / Example |
-|---|---|
-| `SNOWFLAKE_ACCOUNT` | Snowflake account locator (e.g., `zneenng-hz50319`) |
-| `SNOWFLAKE_USER` | Deployment/service user |
-| `SNOWFLAKE_PASSWORD` | Service user password |
-| `SNOWFLAKE_ROLE` | Execution role (e.g., `ACCOUNTADMIN`) |
-| `SNOWFLAKE_WAREHOUSE` | Virtual warehouse (e.g., `COMPUTE_WH`) |
-| `SNOWFLAKE_REGISTRY_HOST` | Registry host (e.g., `zneenng-hz50319.registry.snowflakecomputing.com`) |
-
----
-
-### Step 2: GitHub Actions Workflow File
-
-The workflow is located in [`.github/workflows/deploy_spcs.yml`](file:///.github/workflows/deploy_spcs.yml):
-
-```yaml
-name: Deploy Gas Lift to Snowflake Container Services
-
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: 📥 Check out repository
-        uses: actions/checkout@v4
-
-      - name: 🐳 Set up QEMU (for multi-platform build)
-        uses: docker/setup-qemu-action@v3
-
-      - name: 🛠 Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 🔑 Log in to Snowflake Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.SNOWFLAKE_REGISTRY_HOST }}
-          username: ${{ secrets.SNOWFLAKE_USER }}
-          password: ${{ secrets.SNOWFLAKE_PASSWORD }}
-
-      - name: 🏗 Build and push Backend Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: backend/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ secrets.SNOWFLAKE_REGISTRY_HOST }}/prod/public/gas_lift_images/gas_lift_backend:latest
-
-      - name: 🐍 Set up Python for Snowflake deployment
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: 📦 Install Snowflake CLI / Connector
-        run: |
-          pip install snowflake-connector-python
-
-      - name: 🚀 Update Stage and Deploy Service in Snowflake
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-        run: |
-          python - << 'EOF'
-          import os
-          import snowflake.connector
-
-          conn = snowflake.connector.connect(
-              account=os.environ['SNOWFLAKE_ACCOUNT'],
-              user=os.environ['SNOWFLAKE_USER'],
-              password=os.environ['SNOWFLAKE_PASSWORD'],
-              role=os.environ['SNOWFLAKE_ROLE'],
-              warehouse=os.environ['SNOWFLAKE_WAREHOUSE'],
-              database='PROD',
-              schema='PUBLIC'
-          )
-          cur = conn.cursor()
-
-          # 1. Ensure stage exists
-          cur.execute("CREATE STAGE IF NOT EXISTS PROD.PUBLIC.SPCS_SPECS ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');")
-
-          # 2. Upload spcs_service.yaml to stage
-          print("Uploading spcs_service.yaml to Snowflake stage...")
-          cur.execute("PUT file://spcs_service.yaml @PROD.PUBLIC.SPCS_SPECS AUTO_COMPRESS=FALSE OVERWRITE=TRUE;")
-
-          # 3. Create or update the SPCS service
-          print("Checking service existence...")
-          cur.execute("SHOW SERVICES LIKE 'GAS_LIFT_SERVICE' IN SCHEMA PROD.PUBLIC;")
-          exists = len(cur.fetchall()) > 0
-
-          if exists:
-              print("Updating existing service...")
-              cur.execute("ALTER SERVICE PROD.PUBLIC.GAS_LIFT_SERVICE FROM @PROD.PUBLIC.SPCS_SPECS SPECIFICATION_FILE='spcs_service.yaml';")
-          else:
-              print("Creating new service...")
-              cur.execute("""
-                  CREATE SERVICE PROD.PUBLIC.GAS_LIFT_SERVICE
-                  IN COMPUTE_POOL GAS_LIFT_COMPUTE_POOL
-                  FROM @PROD.PUBLIC.SPCS_SPECS
-                  SPECIFICATION_FILE = 'spcs_service.yaml';
-              """)
-
-          print("Deployment executed successfully!")
-          EOF
-```
-
----
-
-## 🔍 Monitoring & Troubleshooting
-
-### 1. Diagnostic SQL Commands in Snowflake
-
-```sql
--- Check service container statuses
-CALL SYSTEM$GET_SERVICE_STATUS('PROD.PUBLIC.GAS_LIFT_SERVICE');
-
--- Inspect real-time logs of the backend container
-CALL SYSTEM$GET_SERVICE_LOGS('PROD.PUBLIC.GAS_LIFT_SERVICE', '0', 'backend', 200);
-
--- Restart service if containers require state refresh
-ALTER SERVICE PROD.PUBLIC.GAS_LIFT_SERVICE RESTART;
-```
-
-### 2. Common Issues and Resolutions
-
-| Symptom / Error | Root Cause | Solution |
+| Symptom / Error | Possible Cause | Solution |
 |---|---|---|
-| `exec /bin/sh: exec format error` | Image was built for ARM (Apple Silicon) rather than `linux/amd64`. | Pass `--platform linux/amd64` during `docker build` or use `docker/setup-qemu-action` in GitHub Actions. |
-| `Authentication failed for user` | Missing or invalid credentials in local environment. | Inside SPCS, the OAuth token is automatically loaded from `/snowflake/session/token`. Locally, verify your `.env` variables. |
-| `COMPUTE_POOL state: SUSPENDED` | The compute pool paused due to inactivity timeout. | If `AUTO_RESUME = TRUE`, sending traffic to the public endpoint resumes nodes automatically. Alternatively, run: `ALTER COMPUTE_POOL GAS_LIFT_COMPUTE_POOL RESUME;`. |
+| `No Snowflake session or environment variables detected` | Missing or incomplete `.env` file. | Verify that `.env` exists in the repository root with the required `SNOWFLAKE_*` variables. The application will use mock fallback data in the meantime. |
+| `Address already in use [Errno 48 / 10048]` | Port 8000 is occupied by another process. | Run on a different port: `uvicorn backend.main:app --port 8080 --reload`. |
+| `ModuleNotFoundError` | Virtual/Conda environment not activated. | Activate your environment (`conda activate gltb` or `venv\Scripts\activate`) before running commands. |
+| SQLite database locked or corrupted | Concurrent locks or unfinished transactions. | Stop the local server and delete `gas_lift_local.db` to let the application recreate a fresh SQLite database upon restart. |
